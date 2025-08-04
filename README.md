@@ -1,0 +1,1 @@
+# how-to-solve-captcha-in-browser-use-with-capsolver-api

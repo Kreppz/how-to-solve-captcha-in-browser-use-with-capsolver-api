@@ -119,25 +119,27 @@ Create a Python script with the following content:
 
 ```python
 import os
-from browser_use import BrowserUse, Controller, ActionResult
-from langchain_openai import ChatOpenAI
-from playwright.async_api import Page
+import asyncio
 import requests
-import time
+from dotenv import load_dotenv
+from browser_use import Agent, Controller, ActionResult
+from browser_use.browser import BrowserSession
+from browser_use.llm import ChatOpenAI
+from playwright.async_api import Page
 
-# Load API keys from environment
+# Load environment variables from .env file
+load_dotenv()
+
 CAPSOLVER_API_KEY = os.getenv('CAPSOLVER_API_KEY')
 
-# Define the controller
 controller = Controller()
 
 @controller.action('Solve CAPTCHA', domains=['*'])
-async def solve_captcha(page: Page) -> ActionResult:
+async def solve_captcha(page) -> ActionResult:
     if await page.query_selector('.g-recaptcha'):
         site_key = await page.evaluate("document.querySelector('.g-recaptcha').getAttribute('data-sitekey')")
         page_url = page.url
 
-        # Create task with CapSolver
         response = requests.post('https://api.capsolver.com/createTask', json={
             'clientKey': CAPSOLVER_API_KEY,
             'task': {
@@ -146,37 +148,118 @@ async def solve_captcha(page: Page) -> ActionResult:
                 'websiteKey': site_key,
             }
         })
+
         task_id = response.json().get('taskId')
+        print(task_id)
         if not task_id:
             return ActionResult(success=False, message='Failed to create CapSolver task')
 
-        # Poll for solution
         while True:
-            time.sleep(5)
+            await asyncio.sleep(5)
             result_response = requests.post('https://api.capsolver.com/getTaskResult', json={
                 'clientKey': CAPSOLVER_API_KEY,
                 'taskId': task_id
             })
             result = result_response.json()
+            print(f"CAPTCHA result status: {result.get('status')}")
             if result.get('status') == 'ready':
                 solution = result.get('solution', {}).get('gRecaptchaResponse')
+                print(f"CAPTCHA solution: {solution}")
                 if solution:
-                    await page.evaluate(f"document.getElementById('g-recaptcha-response').innerHTML = '{solution}';")
-                    return ActionResult(success=True, message='CAPTCHA solved')
+                    print("Submitting CAPTCHA solution...")
+                    # Try both possible input fields for the CAPTCHA token
+                    await page.evaluate(f"""
+                        // Try the standard g-recaptcha-response field
+                        var gRecaptchaResponse = document.getElementById('g-recaptcha-response');
+                        if (gRecaptchaResponse) {{
+                            gRecaptchaResponse.innerHTML = '{solution}';
+                            var event = new Event('input', {{ bubbles: true }});
+                            gRecaptchaResponse.dispatchEvent(event);
+                        }}
+                        
+                        // Also try the recaptcha-token field
+                        var recaptchaToken = document.getElementById('recaptcha-token');
+                        if (recaptchaToken) {{
+                            recaptchaToken.value = '{solution}';
+                            var event = new Event('input', {{ bubbles: true }});
+                            recaptchaToken.dispatchEvent(event);
+                        }}
+                    """)
+                    
+                    # Wait a moment for the token to be processed
+                    await asyncio.sleep(2)
+                    print("Token injected successfully! CAPTCHA solved.")
+                    
+                    # Method 2: Click submit button directly using the correct selector
+                    print("Now clicking submit button...")
+                    try:
+                        # Use the specific button selector you provided
+                        submit_button = await page.query_selector("body > main > form > fieldset > button")
+                        if submit_button:
+                            await submit_button.click()
+                            print("✅ Submit button clicked successfully!")
+                        else:
+                            print("❌ Submit button not found!")
+                            return ActionResult(success=False, message='Submit button not found')
+                    except Exception as e:
+                        print(f"❌ Error clicking submit button: {e}")
+                        return ActionResult(success=False, message=f'Error clicking submit: {e}')
+                    
+                    print("CAPTCHA solved and form submitted successfully!")
+                    return ActionResult(success=True, message='CAPTCHA solved and form submitted')
+                   
                 else:
                     return ActionResult(success=False, message='No solution found')
             elif result.get('status') == 'failed':
                 return ActionResult(success=False, message='CapSolver failed to solve CAPTCHA')
     return ActionResult(success=False, message='No CAPTCHA found')
 
-# Initialize LLM and agent
 llm = ChatOpenAI(model="gpt-4o-mini")
-agent = BrowserUse(llm=llm, controller=controller)
 
-# Run the agent with a task that might encounter a CAPTCHA
-task = "Go to https://recaptcha-demo.appspot.com/recaptcha-v2-checkbox.php and submit the form. If you encounter a CAPTCHA, use the 'solve_captcha' action to solve it."
-result = agent.run(task)
-print(result)
+async def main():
+    try:
+        print("🚀 Starting browser-use CAPTCHA solver agent...")
+        
+        # Simple task instruction for CAPTCHA solving and form submission
+        task = """Navigate to https://recaptcha-demo.appspot.com/recaptcha-v2-checkbox.php and solve the CAPTCHA, then submit the form.
+
+STEP 1: Navigate to the reCAPTCHA demo page: https://recaptcha-demo.appspot.com/recaptcha-v2-checkbox.php
+
+STEP 2: Wait for the page to fully load. You should see a form with input fields and a reCAPTCHA checkbox.
+
+STEP 3: Look for a reCAPTCHA element (usually a checkbox that says "I'm not a robot" or similar).
+
+STEP 4: Use the "solve_captcha" action to automatically solve the CAPTCHA and submit the form.
+
+STEP 5: Report the final result.
+
+Note: The solve_captcha action will handle both solving the CAPTCHA and submitting the form automatically."""
+        
+        # Create browser session first
+        browser_session = BrowserSession()
+        
+        # Create agent with the browser session
+        agent = Agent(
+            task=task, 
+            llm=llm, 
+            controller=controller,
+            browser_session=browser_session
+        )
+        
+        print("📱 Running CAPTCHA solver agent...")
+        result = await agent.run()
+        print(f"✅ Agent completed: {result}")
+        
+        # Keep browser open to see results
+        input('Press Enter to close the browser...')
+        await browser_session.close()
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
 ```
 
 ### Step-by-Step Explanation
